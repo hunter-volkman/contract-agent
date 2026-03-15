@@ -1,0 +1,16 @@
+{
+  "name": "sam-contract-agent",
+  "version": "0.1.0",
+  "description": "AI agent that finds and analyzes profitable government contract opportunities from SAM.gov",
+  "type": "module",
+  "main": "src/agent.js",
+  "scripts": {
+    "start": "node src/agent.js",
+    "dev":   "node --watch src/agent.js"
+  },
+  "keywords": ["government-contracting", "sam.gov", "ai-agent", "cloudflare", "claude"],
+  "license": "MIT",
+  "dependencies": {
+    "dotenv": "^16.0.0"
+  }
+}
