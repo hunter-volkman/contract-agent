@@ -1,143 +1,59 @@
 /**
  * crawl.js
  * --------
- * Wraps the Cloudflare Browser Rendering /crawl endpoint.
- * Docs: https://developers.cloudflare.com/browser-rendering/rest-api/crawl-endpoint/
+ * Uses Playwright to render SAM.gov opportunity pages and return
+ * their content as plain text for Claude to analyze.
  *
- * Workflow (async job pattern):
- *   POST /crawl        → { jobId }
- *   GET  /crawl/:jobId → poll until status !== 'running'
- *
- * Notes:
- *   - SAM.gov opportunity pages are JavaScript-rendered SPAs — render: true is required.
- *   - We set limit: 1 because we only need the single detail page, not the whole site.
- *   - Results are cached for 14 days by Cloudflare, so re-crawling the same URL is cheap.
+ * SAM.gov pages are JavaScript-rendered SPAs — a plain fetch() will
+ * return an empty shell. Playwright launches a headless Chromium
+ * instance, waits for the page to fully render, and extracts the text.
  */
 
-import { config } from './config.js';
+import { chromium } from 'playwright';
 
-const CF_BASE = `https://api.cloudflare.com/client/v4/accounts/${config.CF_ACCOUNT_ID}/browser-rendering`;
-const HEADERS  = {
-  'Content-Type': 'application/json',
-  Authorization:  `Bearer ${config.CF_API_TOKEN}`,
-};
-
-const POLL_INTERVAL_MS = 2_000;   // check every 2 s
-const MAX_POLLS        = 60;      // give up after 2 min
+const NAVIGATION_TIMEOUT_MS = 60_000;  // 60 seconds to load the page
+const RENDER_WAIT_MS        = 3_000;   // extra wait for JS to settle after load
 
 /**
- * Crawl a single SAM.gov opportunity page and return its content as Markdown.
+ * Render a SAM.gov opportunity page and return its visible text content.
  *
  * @param {string} url - The sam.gov opportunity detail URL
- * @returns {Promise<string>} - Markdown text of the solicitation
+ * @returns {Promise<string>} - Visible text content of the solicitation page
  */
 export async function crawlOpportunityPage(url) {
-  if (!config.CF_ACCOUNT_ID || !config.CF_API_TOKEN) {
-    console.log('  ⚠  Cloudflare credentials not set — returning mock page content.');
-    return getMockPageText(url);
+  const browser = await chromium.launch({ headless: true });
+
+  try {
+    const page = await browser.newPage();
+
+    // Block images, fonts, and media — we only need text
+    await page.route('**/*', (route) => {
+      const type = route.request().resourceType();
+      if (['image', 'media', 'font', 'stylesheet'].includes(type)) {
+        route.abort();
+      } else {
+        route.continue();
+      }
+    });
+
+    await page.goto(url, {
+      waitUntil: 'networkidle',
+      timeout:   NAVIGATION_TIMEOUT_MS,
+    });
+
+    // Give JS-rendered content a moment to fully settle
+    await page.waitForTimeout(RENDER_WAIT_MS);
+
+    // Extract all visible text from the page body
+    const text = await page.evaluate(() => {
+      // Remove script and style elements before extracting text
+      document.querySelectorAll('script, style, noscript').forEach(el => el.remove());
+      return document.body?.innerText ?? '';
+    });
+
+    return text.trim();
+
+  } finally {
+    await browser.close();
   }
-
-  const jobId  = await submitCrawl(url);
-  const result = await pollForResult(jobId);
-  const page   = result.pages?.[0];
-
-  if (!page) throw new Error(`No pages returned for crawl job ${jobId}`);
-
-  return page.markdown ?? page.text ?? page.content ?? '';
-}
-
-// ─── Internal helpers ─────────────────────────────────────────────────────────
-
-async function submitCrawl(url) {
-  const res = await fetch(`${CF_BASE}/crawl`, {
-    method:  'POST',
-    headers: HEADERS,
-    body: JSON.stringify({
-      url,
-      format:              'markdown',   // clean markdown — ideal for LLM consumption
-      render:              true,         // SAM.gov pages require JS execution
-      limit:               1,            // single page, no link-following
-      rejectResourceTypes: ['image', 'media', 'font'],
-    }),
-  });
-
-  if (!res.ok) {
-    throw new Error(`Cloudflare crawl submit failed ${res.status}: ${await res.text()}`);
-  }
-
-  const data  = await res.json();
-  const jobId = data.result?.id ?? data.id;
-
-  if (!jobId) throw new Error('Cloudflare API returned no job ID');
-  return jobId;
-}
-
-async function pollForResult(jobId) {
-  for (let i = 0; i < MAX_POLLS; i++) {
-    await sleep(POLL_INTERVAL_MS);
-
-    const res = await fetch(`${CF_BASE}/crawl/${jobId}`, { headers: HEADERS });
-    if (!res.ok) throw new Error(`Cloudflare poll failed ${res.status}`);
-
-    const data   = await res.json();
-    const result = data.result ?? data;
-
-    if (result.status === 'running') continue;
-
-    if (result.status === 'cancelled_due_to_limits') {
-      throw new Error('Cloudflare crawl hit account limits. Check your Workers plan.');
-    }
-    if (result.status === 'cancelled_due_to_timeout') {
-      throw new Error('Cloudflare crawl timed out. Something went wrong.');
-    }
-
-    return result;
-  }
-
-  throw new Error(`Crawl job ${jobId} did not complete within ${MAX_POLLS * POLL_INTERVAL_MS / 1000}s`);
-}
-
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-// ─── Demo mode (no Cloudflare credentials) ───────────────────────────────────
-
-function getMockPageText(url) {
-  const id = url.split('/').at(-2) ?? 'MOCK';
-  return `
-# Solicitation: ${id}
-
-## Summary
-The Government requires software development and cloud migration support services
-for its internal data management infrastructure. The period of performance is
-12 months with two 12-month options.
-
-## Scope of Work
-- Migrate legacy on-premise systems to AWS GovCloud
-- Implement CI/CD pipelines using GitHub Actions and Terraform
-- Provide DevSecOps support including SAST/DAST tooling integration
-- Deliver NIST 800-53 compliance documentation
-
-## Requirements
-- Active Secret clearance for at least 2 key personnel
-- Demonstrated experience with AWS GovCloud (past 3 years)
-- CMMC Level 2 certification required
-- ISO 27001 preferred
-
-## Evaluation Criteria
-1. Technical approach (40%)
-2. Past performance (30%)
-3. Price (30%)
-
-## Period of Performance
-Base year: 12 months. Two option years.
-Estimated value: $2.4M
-
-## Set-Aside
-Small Business
-
-## Response Date
-April 15, 2026 — 2:00 PM EST
-  `.trim();
 }

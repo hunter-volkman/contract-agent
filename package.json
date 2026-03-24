@@ -6,11 +6,18 @@
   "main": "src/agent.js",
   "scripts": {
     "start": "node src/agent.js",
-    "dev":   "node --watch src/agent.js"
+    "dev": "node --watch src/agent.js"
   },
-  "keywords": ["government-contracting", "sam.gov", "ai-agent", "cloudflare", "claude"],
+  "keywords": [
+    "government-contracting",
+    "sam.gov",
+    "ai-agent",
+    "cloudflare",
+    "claude"
+  ],
   "license": "MIT",
   "dependencies": {
-    "dotenv": "^16.0.0"
+    "dotenv": "^16.0.0",
+    "playwright": "^1.58.2"
   }
 }
